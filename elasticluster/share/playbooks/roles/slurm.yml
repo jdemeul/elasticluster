@@ -23,7 +23,7 @@
       NFS_MOUNTS:
         - fs: '{{groups.slurm_master[0]}}:/home'
           mountpoint: '/home'
-    - role: autofs
+    # - role: autofs
     - slurm-worker
 
 
@@ -37,7 +37,7 @@
       NFS_MOUNTS:
         - fs: '{{groups.slurm_master[0]}}:/home'
           mountpoint: '/home'
-    - role: autofs
+    # - role: autofs
     - slurm-client
 
 
