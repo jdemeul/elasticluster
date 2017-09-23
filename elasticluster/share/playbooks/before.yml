@@ -16,4 +16,60 @@
   hosts: all
   # by default these are no-op (empty task list)
   roles: []
-  tasks: []
+  tasks:
+  - name: upgrade all packages
+    yum:
+      name: '*'
+      state: latest
+
+  - name: Check for reboot hint.
+    shell: LAST_KERNEL=$(rpm -q --last kernel | perl -pe 's/^kernel-(\S+).*/$1/' | head -1);CURRENT_KERNEL=$(uname -r); if [ $LAST_KERNEL != $CURRENT_KERNEL ]; then echo 'reboot'; else echo 'no'; fi
+    ignore_errors: true
+    register: reboot_hint
+
+  - name: Rebooting ...
+    shell: sleep 2 && /usr/sbin/reboot
+    async: 1
+    poll: 0
+    ignore_errors: true
+    when: reboot_hint.stdout.find("reboot") != -1
+
+  - name: Wait for host to boot
+    become: false
+    local_action: wait_for
+    args:
+      host: "{{ inventory_hostname }}"
+      port: 22
+      state: started
+      delay: 30
+      timeout: 180
+    when: reboot_hint.stdout.find("reboot") != -1
+
+  - name: start nfs service
+    systemd:
+      enabled: yes
+      state: started
+      name: nfs
+  
+  - stat:
+      path: /srv/sw/eb/software/EasyBuild/3.3.1/bin/eb
+    register: ebinstall
+
+  - debug:
+      msg: "{{ ebinstall }}"
+
+
+# - name: Apply worker customizations (before)
+#   tags:
+#     - before
+#     - local
+#   hosts: slurm_worker
+#   tasks:
+#   - name: unmount shared sw folder to allow elasticluster setup to progress through EasyBuild install on the workers
+#     mount:
+#       name: /srv/sw/eb
+#       src: 'frontend001:/srv/sw/eb'
+#       fstype: nfs
+#       opts: ro,async,auto
+#       state: unmounted
+  

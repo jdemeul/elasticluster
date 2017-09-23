@@ -3,9 +3,7 @@
 
 dependencies:
   # install `easybuild` (which installs `lmod` and `lua`) to manage "environment module" files
-  - role: easybuild
-    EASYBUILD_VERSION: '3.3.1'
-    EASYBUILD_PREFIX: '/srv/sw/eb'
-    easybuild_bootstrap_url: 'https://raw.githubusercontent.com/easybuilders/easybuild-framework/develop/easybuild/scripts/bootstrap_eb.py'
-  # install `lmod` to manage "environment module" files
-  - role: lmod
+  - { role: 'easybuild', EASYBUILD_VERSION: '3.3.1', EASYBUILD_PREFIX: '/srv/sw/eb', easybuild_bootstrap_url: 'https://raw.githubusercontent.com/easybuilders/easybuild-framework/develop/easybuild/scripts/bootstrap_eb.py', when: 'ebinstall.stat.exists == False' }# install `lmod` to manage "environment module" files
+  # - { role: 'easybuild', EASYBUILD_VERSION: '3.3.1', EASYBUILD_PREFIX: '/srv/sw/eb', easybuild_bootstrap_url: 'https://raw.githubusercontent.com/easybuilders/easybuild-framework/develop/easybuild/scripts/bootstrap_eb.py' }
+  # - role: lua
+  # - role: lmod

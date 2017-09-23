@@ -16,4 +16,211 @@
   hosts: all
   # by default these are no-op (empty task list)
   roles: []
-  tasks: []
+  tasks:
+  - name: put ifcfg-eth1 file in place
+    copy:
+      force: no
+      src: /home/jdemeul/instance_config/ifcfg-eth1
+      dest: /etc/sysconfig/network-scripts/ifcfg-eth1
+      mode: 0644
+
+  - name: bring eth1 up
+    command: ifup eth1
+    ignore_errors: True
+
+  - name: reapply correct DNS settings
+    lineinfile:
+      path: /etc/resolv.conf
+      regexp: '^nameserver'
+      line: 'nameserver 8.8.8.8'
+      owner: root
+      group: root
+      mode: 0644
+
+  # - name: Allow password authentication
+  #   lineinfile:
+  #     dest=/etc/ssh/sshd_config
+  #     regexp="^PasswordAuthentication"
+  #     line="PasswordAuthentication yes"
+  #     state=present
+  #   notify: Restart ssh
+
+  - group:
+      name: vanloo
+      state: present
+      gid: 1002
+
+  - include_vars: /home/jdemeul/instance_config/users.yml
+
+  - name: Add users | create users, shell, home dirs
+    user: name={{ item.username }} uid={{ item.userid }} shell=/bin/bash createhome=yes group=vanloo groups=vanloo,easybuild password={{ user_pass }} comment='create with ansible'
+    when: item.username != 'centos'
+    with_items: '{{users}}'
+
+  - name: Setup | authorized key upload
+    authorized_key: user={{ item.username }}
+      key="{{ lookup('file', '/home/jdemeul/instance_config/pub_keys/{{ item.username }}.pub') }}"
+    with_items: '{{users}}'
+
+  - name: Sudoers | add users to wheel
+    user: name={{ item.username }} append=yes groups=vanloo,wheel,easybuild
+    when: item.use_sudo == True
+    with_items: '{{users}}'
+
+  - name: Set primary group centos user to easybuild
+    user: name=centos group=easybuild append=yes
+
+  - name: create mountpoint for the shared storage
+    file:
+      path: /srv/shared
+      state: directory
+      owner: centos
+      group: vanloo
+      mode: 0755
+
+  - name: mount shared storage
+    mount:
+      name: /srv/shared/
+      src: 10.248.192.54:/emed/bulk/tcga-test
+      fstype: nfs
+      opts: defaults
+      state: mounted
+
+  - name: install more yum packages
+    yum:
+      name: screen,cppunit,vim-enhanced,tmux,sysstat,wget,zlib,zlib-devel,lsof,htop,iotop,libibverbs,libibverbs-devel,tcl-devel,tk-devel,pango-devel,libffi,psmisc,rrdtool,xz-devel,libXtst,libXt,libXmu
+
+
+- name: Apply frontend customizations (after)
+  tags:
+    - after
+    - local
+  hosts: slurm_master
+  roles: []
+  tasks:
+  - name: Create vanloo account for cluster
+    tags:
+      - slurm
+    shell: |
+      sacctmgr --immediate --parsable --noheader list account Cluster=elasticluster  | grep '^vanloo|' \
+        || sacctmgr -i --quiet add account vanloo Cluster=elasticluster
+  
+  - include_vars: /home/jdemeul/instance_config/users.yml
+
+  - name: Add users to slurm accounting
+    tags:
+      - slurm
+    shell: |
+      sacctmgr --immediate --parsable --noheader list user Account='{{item.username}}' | grep '^{{item.username}}|' \
+        || sacctmgr --immediate --quiet add user '{{item.username}}' DefaultAccount=vanloo
+    with_items: '{{users}}'
+
+  - name: adding sw mount to exports
+    lineinfile:
+      name: /etc/exports
+      line: '/srv/sw/eb compute*(ro,no_root_squash,async,no_subtree_check,crossmnt)'
+
+  - name: export sw
+    command: exportfs -a
+
+
+- name: Apply worker customizations (after)
+  tags:
+    - after
+    - local
+  hosts: slurm_worker
+  tasks:
+  - name: unmount shared sw folder to make deletion safe
+    mount:
+      name: /srv/sw/eb
+      src: 'frontend001:/srv/sw/eb'
+      fstype: nfs
+      opts: ro,async,auto
+      state: unmounted
+
+  - name: remove own sw folder
+    file:
+      state: absent
+      path: /srv/sw/eb/
+
+  - name: mount shared sw folder
+    mount:
+      name: /srv/sw/eb
+      src: 'frontend001:/srv/sw/eb'
+      fstype: nfs
+      opts: ro,async,auto
+      state: mounted
+
+
+- name: Apply final frontend customizations (after)
+  tags:
+    - local
+    - after
+  hosts: slurm_master
+  tasks:
+  - name: reset ssh connection to allow user changes to affect 'current login user'
+    shell: sleep 1; pkill -u {{ ansible_ssh_user }} sshd
+    async: 3
+    poll: 2
+
+  # - name: reset ssh connection to allow user changes to affect 'current login user'
+  #   meta: reset_connection
+
+  - name: Go for full toolchains rather than minimal
+    lineinfile:
+      dest=/etc/easybuild.cfg
+      regexp="^minimal-toolchains"
+      line="minimal-toolchains = no"
+      state=present
+
+  - name: Copy new easyconfigs and sources (GATK + Java)
+    copy:
+      src: /home/jdemeul/instance_config/easyconfigs
+      dest: /home/centos/
+
+  - name: Build initial set of software
+    become_user: centos
+    command: eb {{ item }} -r --robot-paths :/home/centos/easyconfigs/
+    with_items:
+      - Java-1.8.0_141.eb
+      - R-3.4.1-foss-2016b-X11-20160819.eb
+      - R-bundle-Bioconductor-3.5-foss-2016b-R-3.4.1.eb
+      - IMPUTE2-2.3.2_x86_64_dynamic.eb
+      - ASCAT-2.5-foss-2016b-R-3.4.1.eb
+      - BWA-0.7.15-foss-2016b.eb
+      - TopHat-2.1.1-foss-2016b.eb
+      - tbb-2017_U7-foss-2016b.eb
+      - Bowtie2-2.3.2-foss-2016b.eb
+      - BEDTools-2.26.0-foss-2016b.eb
+      - SAMtools-1.5-foss-2016b.eb
+      - GATK-3.8-Java-1.8.0_141.eb
+      - picard-2.10.10-Java-1.8.0_141.eb
+      - Circos-0.69-5-foss-2016b-Perl-5.24.0.eb
+      - Python-3.5.2-foss-2016b.eb
+      - apt-1.20.5.eb
+      - PennCNV-Affy-2009Aug27.eb
+      - HTSeq-0.6.1p1-foss-2016b-Python-2.7.12.eb
+
+  - name: Build Battenberg using IMPUTE2 dependency
+    become_user: centos
+    command: eb Battenberg-2.2.6-foss-2016b-R-3.4.1.eb -r --robot-paths :/home/centos/easyconfigs/ --use-existing-modules
+
+  - name: download rstudio-server
+    get_url:
+      url: https://download2.rstudio.org/rstudio-server-rhel-1.0.153-x86_64.rpm
+      dest: /home/centos/rstudio-server-rhel-1.0.153-x86_64.rpm
+
+  - name: install rstudio server
+    yum:
+      name: /home/centos/rstudio-server-rhel-1.0.153-x86_64.rpm
+      disable_gpg_check: yes
+      state: present
+
+  - name: configure rstudio-server
+    lineinfile:
+      name: /etc/rstudio/rserver.conf
+      line: 'rsession-which-r=/srv/sw/eb/software/R/3.4.1-foss-2016b-X11-20160819/bin/R'
+
+  - name: start rstudio-server
+    command: rstudio-server start
+  
