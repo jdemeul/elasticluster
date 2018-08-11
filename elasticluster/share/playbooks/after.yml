@@ -9,11 +9,257 @@
 # --assume-unchanged after.yml` to avoid committing them accidentally
 # into ElastiCluster's main branch.
 #
-- name: Apply local customizations (after)
+- name: Install local packages (after)
   tags:
     - after
     - local
+    - vanloo
   hosts: all
-  # by default these are no-op (empty task list)
+  tasks:
+  - name: Install additional tools + fontconfig-devel for X11
+    yum:
+      name: screen,vim-enhanced,tmux,wget,lsof,htop,iotop,fontconfig-devel,zsh
+
+
+- name: Set up groups, users (NIS/YS), ssh keys and create personal R package libraries
+  tags:
+    - after
+    - local
+    - vanloo
+  hosts: slurm_master
+  vars_files:
+    - /home/jdemeul/instance_config/users.yml
+  tasks:
+  - name: Create vanloo group
+    group:
+      name: vanloo
+      state: present
+      gid: 1002
+
+  - name: Create easybuild group
+    group:
+      name: easybuild
+      state: present
+      gid: 1001
+      
+  - name: Add users, set shells and home
+    user: name={{ item.username }} uid={{ item.userid }} shell=/bin/bash createhome=yes group=vanloo groups=vanloo,easybuild password={{ user_pass }} comment='create with ansible'
+    when: item.username != 'centos'
+    with_items: '{{users}}'
+
+  - name: Add specific users to wheel
+    user: name={{ item.username }} append=yes groups=vanloo,easybuild,wheel
+    when: item.use_sudo == True
+    with_items: '{{users}}'
+
+  - name: Authorized key upload
+    authorized_key: user={{ item.username }}
+      key="{{ lookup('file', '/home/jdemeul/instance_config/pub_keys/{{ item.username }}.pub') }}"
+    with_items: '{{users}}'
+
+  - name: Update NIS/YP databases to export users/groups (NIS master server)
+    command: |
+      make
+    args:
+      chdir: /var/yp
+
+  - name: Create personal R package libraries
+    file:
+      path: '/home/{{ item.username }}/R/library/'
+      state: directory
+      owner: '{{ item.username }}'
+      mode: 0755
+    with_items: '{{users}}'
+
+
+- name: Set up local slurm accounting frontend (after)
+  tags:
+    - after
+    - local
+    - vanloo
+  hosts: slurm_master
+  vars_files:
+    - /home/jdemeul/instance_config/users.yml
+  tasks:
+  - name: Create vanloo account for cluster
+    shell: |
+      sacctmgr --immediate --parsable --noheader list account Cluster=elasticluster  | grep '^vanloo|' \
+        || sacctmgr -i --quiet add account vanloo Cluster=elasticluster
+
+  - name: Add users to slurm accounting
+    shell: |
+      sacctmgr --immediate --parsable --noheader list user Account='{{item.username}}' | grep '^{{item.username}}|' \
+        || sacctmgr --immediate --quiet add user '{{item.username}}' DefaultAccount=vanloo
+    with_items: '{{users}}'
+
+
+- name: Install local frontend EasyBuild packages (after)
+  tags:
+    - after
+    - local
+    - easyb
+  hosts: slurm_master
+  vars_files:
+    - /home/jdemeul/instance_config/ebsoft.yml
+  tasks:
+  - name: Add easybuild user to build software stack
+    user: name=easybuild uid=1100 shell=/bin/bash createhome=yes group=easybuild comment='create with ansible'
+
+  - name: Copy new easyconfigs
+    copy:
+      src: /home/jdemeul/instance_config/easyconfigs
+      dest: /home/easybuild/
+      owner: easybuild
+
+  - name: Copy new sources (Java)
+    copy:
+      force: no
+      src: /home/jdemeul/instance_config/jdk-8u162-linux-x64.tar.gz
+      dest: /srv/sw/eb/software/EasyBuild/3.6.2/lib/python2.7/site-packages/easybuild_easyconfigs-3.6.2-py2.7.egg/easybuild/easyconfigs/j/Java/j/Java/
+      owner: easybuild
+
+  - name: Build initial software stack
+    become_user: easybuild
+    shell: |
+      set -e
+      . /etc/profile.d/easybuild.sh
+      . /etc/profile.d/modules.sh
+      module load EasyBuild
+      eb {{ EB_INSTALL|join(' ') }} -r --robot-paths :/home/easybuild/easyconfigs/
+    environment: 
+      PKG_CONFIG_PATH: /usr/lib64/pkgconfig/
+
+
+- name: Configure local R and RStudio server (after)
+  tags:
+    - after
+    - local
+    - rstudio
+  hosts: slurm_master
   roles: []
-  tasks: []
+  tasks:
+  - name: configure R environment (user library path)
+    lineinfile:
+      path: '/srv/sw/eb/software/R/3.5.1-foss-2018a-X11-20180131-bare/lib64/R/etc/Renviron'
+      regexp: '^R_LIBS_USER'
+      line: "R_LIBS_USER=${R_LIBS_USER-'~/R/library'}"
+
+  - name: configure R profile
+    copy:
+      dest: '/srv/sw/eb/software/R/3.5.1-foss-2018a-X11-20180131-bare/lib64/R/etc/Rprofile.site'
+      content: '.libPaths( c(Sys.getenv("R_LIBS_USER"), .libPaths()) )'
+      owner: centos
+      group: easybuild
+      mode: 0664
+
+  - name: download rstudio-server
+    get_url:
+      url: https://download2.rstudio.org/rstudio-server-rhel-1.1.456-x86_64.rpm
+      dest: /home/centos/rstudio-server-rhel-1.1.456-x86_64.rpm
+
+  - name: install rstudio server
+    yum:
+      name: /home/centos/rstudio-server-rhel-1.1.456-x86_64.rpm
+      disable_gpg_check: yes
+      state: present
+
+  - name: configure rstudio-server
+    lineinfile:
+      path: /etc/rstudio/rserver.conf
+      regexp: '^rsession-which-r'
+      line: 'rsession-which-r=/srv/sw/eb/software/R/3.5.1-foss-2018a-X11-20180131-bare/bin/R'
+
+  - name: start rstudio-server
+    command: rstudio-server restart
+    ignore_errors: yes
+
+
+- name: Apply local network setting and bring vanloo-external interface up on all nodes (after)
+  tags:
+    - after
+    - local
+    - nfs
+  hosts: all
+  tasks:
+  - name: Put ifcfg-eth1 file in place
+    copy:
+      force: no
+      src: /home/jdemeul/instance_config/ifcfg-eth1
+      dest: /etc/sysconfig/network-scripts/ifcfg-eth1
+      mode: 0644
+      owner: root
+      group: root
+
+  - name: Bring eth1 up
+    command: ifup eth1
+    ignore_errors: True
+
+  - name: Reapply correct DNS settings
+    lineinfile:
+      path: /etc/resolv.conf
+      regexp: '8\.8\.8\.8$'
+      line: 'nameserver 8.8.8.8'
+
+
+- name: Local NFS export of EasyBuild sw on master to workers (after)
+  tags:
+    - after
+    - local
+    - nfs
+  hosts: slurm_master
+  tasks:
+  - name: Export directories
+    nfsexport:
+      path: '/srv/sw/eb'
+      clients: "{{groups.slurm_worker|default([])}}"
+      options: 'ro,no_root_squash,async,no_subtree_check,crossmnt'
+      state: exported
+
+  - name: Reload NFS exports file
+    command: exportfs -r
+
+
+- name: Local NFS mount of EasyBuild sw on master to workers (after)
+  tags:
+    - after
+    - local
+    - nfs
+  hosts: slurm_worker
+  tasks:
+  - name: ensure sw directory exists
+    file:
+      path: '/srv/sw/eb'
+      state: directory
+      owner: centos
+      group: easybuild
+
+  - name: mount sw folder on workers
+    mount:
+      name: '/srv/sw/eb'
+      src: '{{groups.slurm_master[0]}}:/srv/sw/eb'
+      fstype: nfs
+      opts: 'defaults'
+      state: mounted
+
+
+- name: local NFS mount of shared storage (after)
+  tags:
+    - after
+    - local
+    - nfs
+  hosts: all
+  tasks:
+  - name: ensure shared directory exists
+    file:
+      path: '/srv/shared'
+      state: directory
+      owner: centos
+      group: vanloo
+
+  - name: mount shared storage on all nodes
+    mount:
+      name: '/srv/shared'
+      src: '10.248.192.54:/emed/bulk/tcga-test'
+      fstype: nfs
+      opts: 'defaults'
+      state: mounted
