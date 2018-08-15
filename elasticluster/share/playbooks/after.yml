@@ -147,7 +147,9 @@
   - name: configure R profile
     copy:
       dest: '/srv/sw/eb/software/R/3.5.1-foss-2018a-X11-20180131-bare/lib64/R/etc/Rprofile.site'
-      content: '.libPaths( c(Sys.getenv("R_LIBS_USER"), .libPaths()) )'
+      content: |
+        .libPaths( c(Sys.getenv("R_LIBS_USER"), .libPaths()) )
+        options(bitmapType='cairo')
       owner: centos
       group: easybuild
       mode: 0664
